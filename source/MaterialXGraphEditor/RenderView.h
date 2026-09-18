@@ -118,7 +118,7 @@ class RenderView
     }
 
     // Return the selected material.
-    mx::GlslMaterialPtr getSelectedMaterial() const
+    mx::MaterialPtr getSelectedMaterial() const
     {
         if (_selectedMaterial < _materials.size())
         {
@@ -142,12 +142,12 @@ class RenderView
         return _genContext;
     }
 
-    std::map<mx::MeshPartitionPtr, mx::GlslMaterialPtr> getMaterialAssignments()
+    std::map<mx::MeshPartitionPtr, mx::MaterialPtr> getMaterialAssignments()
     {
         return _materialAssignments;
     }
 
-    std::vector<mx::GlslMaterialPtr> getMaterials()
+    std::vector<mx::MaterialPtr> getMaterials()
     {
         return _materials;
     }
@@ -200,7 +200,7 @@ class RenderView
     void reloadShaders();
 
     void setDocument(mx::DocumentPtr document);
-    void assignMaterial(mx::MeshPartitionPtr geometry, mx::GlslMaterialPtr material);
+    void assignMaterial(mx::MeshPartitionPtr geometry, mx::MaterialPtr material);
     void updateMaterials(mx::TypedElementPtr typedElem);
     void setMouseButtonEvent(int button, bool down, mx::Vector2 pos);
     void setMouseMotionEvent(mx::Vector2 pos);
@@ -226,7 +226,7 @@ class RenderView
     void applyDirectLights(mx::DocumentPtr doc);
 
     // Mark the given material as currently selected in the view.
-    void setSelectedMaterial(mx::GlslMaterialPtr material)
+    void setSelectedMaterial(mx::MaterialPtr material)
     {
         for (size_t i = 0; i < _materials.size(); i++)
         {
@@ -245,7 +245,7 @@ class RenderView
     mx::ImagePtr getShadowMap();
 
     void renderFrame();
-    void renderScreenSpaceQuad(mx::GlslMaterialPtr material);
+    void renderScreenSpaceQuad(mx::MaterialPtr material);
 
   private:
     mx::FileSearchPath _materialSearchPath;
@@ -288,8 +288,8 @@ class RenderView
     float _lightRotation;
 
     // Shadow mapping
-    mx::GlslMaterialPtr _shadowMaterial;
-    mx::GlslMaterialPtr _shadowBlurMaterial;
+    mx::MaterialPtr _shadowMaterial;
+    mx::MaterialPtr _shadowBlurMaterial;
     mx::ImagePtr _shadowMap;
     mx::ImagePtr _graphRender;
     unsigned int _shadowSoftness;
@@ -299,12 +299,11 @@ class RenderView
     size_t _selectedGeom;
 
     // Material selections
-    std::vector<mx::GlslMaterialPtr> _materials;
-    mx::GlslMaterialPtr _wireMaterial;
+    std::vector<mx::MaterialPtr> _materials;
     size_t _selectedMaterial;
 
     // Material assignments
-    std::map<mx::MeshPartitionPtr, mx::GlslMaterialPtr> _materialAssignments;
+    std::map<mx::MeshPartitionPtr, mx::MaterialPtr> _materialAssignments;
 
     // Cameras
     mx::CameraPtr _viewCamera;
