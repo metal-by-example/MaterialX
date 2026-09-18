@@ -199,7 +199,7 @@ void RenderView::initialize()
     _pixelRatio = 1.f;
 }
 
-void RenderView::assignMaterial(mx::MeshPartitionPtr geometry, mx::GlslMaterialPtr material)
+void RenderView::assignMaterial(mx::MeshPartitionPtr geometry, mx::MaterialPtr material)
 {
     if (!geometry || _geometryHandler->getMeshes().empty())
     {
@@ -269,7 +269,7 @@ void RenderView::loadMesh(const mx::FilePath& filename)
 
         // Assign the selected material to all geometries.
         _materialAssignments.clear();
-        mx::GlslMaterialPtr material = getSelectedMaterial();
+        mx::MaterialPtr material = getSelectedMaterial();
         if (material)
         {
             for (mx::MeshPartitionPtr geom : _geometryList)
@@ -279,10 +279,6 @@ void RenderView::loadMesh(const mx::FilePath& filename)
         }
 
         // Unbind utility materials from the previous geometry.
-        if (_wireMaterial)
-        {
-            _wireMaterial->unbindGeometry();
-        }
         if (_shadowMaterial)
         {
             _shadowMaterial->unbindGeometry();
@@ -368,7 +364,7 @@ void RenderView::setMouseButtonEvent(int button, bool down, mx::Vector2 pos)
 void RenderView::setMaterial(mx::TypedElementPtr elem)
 {
     // compare graph element to material in order to assign correct one
-    for (mx::GlslMaterialPtr mat : _materials)
+    for (mx::MaterialPtr mat : _materials)
     {
         mx::TypedElementPtr telem = mat->getElement();
         if (telem->getNamePath() == elem->getNamePath())
@@ -393,7 +389,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
     }
     _materials.clear();
 
-    std::vector<mx::GlslMaterialPtr> newMaterials;
+    std::vector<mx::MaterialPtr> newMaterials;
     try
     {
         _materialSearchPath = mx::getSourceSearchPath(_document);
@@ -435,7 +431,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             {
                 for (const std::string& udim : udimSetValue->asA<mx::StringVec>())
                 {
-                    mx::GlslMaterialPtr mat = mx::GlslMaterial::create();
+                    mx::MaterialPtr mat = mx::GlslMaterial::create();
                     mat->setDocument(_document);
                     mat->setElement(typedElem);
                     mat->setMaterialNode(materialNode);
@@ -447,7 +443,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             }
             else
             {
-                mx::GlslMaterialPtr mat = mx::GlslMaterial::create();
+                mx::MaterialPtr mat = mx::GlslMaterial::create();
                 mat->setDocument(_document);
                 mat->setElement(typedElem);
                 mat->setMaterialNode(materialNode);
@@ -465,8 +461,8 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             // Add new materials to the global vector.
             _materials.insert(_materials.end(), newMaterials.begin(), newMaterials.end());
 
-            mx::GlslMaterialPtr udimMaterial = nullptr;
-            for (mx::GlslMaterialPtr mat : newMaterials)
+            mx::MaterialPtr udimMaterial = nullptr;
+            for (mx::MaterialPtr mat : newMaterials)
             {
                 // Clear cached implementations, in case libraries on the file system have changed.
                 _genContext.clearNodeImplementations();
@@ -528,7 +524,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             }
 
             // Apply fallback assignments.
-            mx::GlslMaterialPtr fallbackMaterial = newMaterials[0];
+            mx::MaterialPtr fallbackMaterial = newMaterials[0];
             for (mx::MeshPartitionPtr geom : _geometryList)
             {
                 if (!_materialAssignments[geom])
@@ -542,7 +538,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             {
                 if (pair.first == getSelectedGeometry())
                 {
-                    mx::GlslMaterialPtr material = pair.second;
+                    mx::MaterialPtr material = pair.second;
                     if (material)
                     {
                         material->bindShader();
@@ -568,7 +564,7 @@ void RenderView::reloadShaders()
 {
     try
     {
-        for (mx::GlslMaterialPtr material : _materials)
+        for (mx::MaterialPtr material : _materials)
         {
             material->generateShader(_genContext);
             for (GLenum error = glGetError(); error; error = glGetError())
@@ -803,7 +799,7 @@ void RenderView::renderFrame()
     for (const auto& assignment : _materialAssignments)
     {
         mx::MeshPartitionPtr geom = assignment.first;
-        mx::GlslMaterialPtr material = assignment.second;
+        auto material = std::static_pointer_cast<mx::GlslMaterial>(assignment.second);
         if (!material)
         {
             continue;
@@ -831,7 +827,7 @@ void RenderView::renderFrame()
         for (const auto& assignment : _materialAssignments)
         {
             mx::MeshPartitionPtr geom = assignment.first;
-            mx::GlslMaterialPtr material = assignment.second;
+            auto material = std::static_pointer_cast<mx::GlslMaterial>(assignment.second);
             if (!material || !material->hasTransparency())
             {
                 continue;
@@ -934,7 +930,7 @@ void RenderView::updateCameras()
     }
 }
 
-void RenderView::renderScreenSpaceQuad(mx::GlslMaterialPtr material)
+void RenderView::renderScreenSpaceQuad(mx::MaterialPtr material)
 {
     if (!_quadMesh)
         _quadMesh = mx::GeometryHandler::createQuadMesh();
@@ -1014,7 +1010,8 @@ mx::ImagePtr RenderView::getShadowMap()
                     int textureLocation = textureHandler->getBoundTextureLocation(_shadowMap->getResourceId());
                     if (textureLocation >= 0)
                     {
-                        _shadowBlurMaterial->getProgram()->bindUniform("image_file", mx::Value::createValue(textureLocation));
+                        std::static_pointer_cast<mx::GlslMaterial>(_shadowBlurMaterial)
+                            ->getProgram()->bindUniform("image_file", mx::Value::createValue(textureLocation));
                     }
                 }
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
