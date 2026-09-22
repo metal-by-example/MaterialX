@@ -6,8 +6,12 @@
 #ifndef MATERIALX_RENDERVIEW_H
 #define MATERIALX_RENDERVIEW_H
 
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+#include <MaterialXRenderMsl/MetalFramebuffer.h>
+#else
 #include <MaterialXRenderGlsl/GLFramebuffer.h>
-#include <MaterialXRenderGlsl/GlslMaterial.h>
+#endif
+#include <MaterialXRender/ShaderMaterial.h>
 
 #include <MaterialXRender/GeometryHandler.h>
 #include <MaterialXRender/LightHandler.h>
@@ -142,7 +146,7 @@ class RenderView
         return _genContext;
     }
 
-    std::map<mx::MeshPartitionPtr, mx::MaterialPtr> getMaterialAssignments()
+    const std::map<mx::MeshPartitionPtr, mx::MaterialPtr> &getMaterialAssignments()
     {
         return _materialAssignments;
     }
@@ -196,11 +200,12 @@ class RenderView
     }
 
     void drawContents();
-    unsigned int _textureID;
+    uintptr_t _textureID;
     void reloadShaders();
 
     void setDocument(mx::DocumentPtr document);
     void assignMaterial(mx::MeshPartitionPtr geometry, mx::MaterialPtr material);
+    mx::MaterialPtr createMaterial();
     void updateMaterials(mx::TypedElementPtr typedElem);
     void setMouseButtonEvent(int button, bool down, mx::Vector2 pos);
     void setMouseMotionEvent(mx::Vector2 pos);
@@ -269,7 +274,11 @@ class RenderView
     float _pixelRatio;
     int _viewWidth;
     int _viewHeight;
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    mx::MetalFramebufferPtr _renderFrame;
+#else
     mx::GLFramebufferPtr _renderFrame;
+#endif
 
     mx::Vector3 _userTranslation;
     mx::Vector3 _userTranslationStart;
@@ -288,6 +297,12 @@ class RenderView
     float _lightRotation;
 
     // Shadow mapping
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    mx::MetalFramebufferPtr  _shadowMapFramebuffer;
+    std::array<mx::ImagePtr, 2> _shadowMaps;
+#else
+    mx::GLFramebufferPtr  _shadowMapFramebuffer;
+#endif
     mx::MaterialPtr _shadowMaterial;
     mx::MaterialPtr _shadowBlurMaterial;
     mx::ImagePtr _shadowMap;
@@ -306,6 +321,7 @@ class RenderView
     std::map<mx::MeshPartitionPtr, mx::MaterialPtr> _materialAssignments;
 
     // Cameras
+    mx::CameraPtr _identityCamera;
     mx::CameraPtr _viewCamera;
     mx::CameraPtr _envCamera;
     mx::CameraPtr _shadowCamera;

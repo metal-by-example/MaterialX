@@ -110,11 +110,16 @@ std::string getUserNodeDefName(const std::string& val)
 
 static void EnableSRGBCallback(const ImDrawList*, const ImDrawCmd*)
 {
+#ifndef MATERIALX_GRAPHEDITOR_METAL_BACKEND
     glEnable(GL_FRAMEBUFFER_SRGB);
+#endif
 }
+
 static void DisableSRGBCallback(const ImDrawList*, const ImDrawCmd*)
 {
+#ifndef MATERIALX_GRAPHEDITOR_METAL_BACKEND
     glDisable(GL_FRAMEBUFFER_SRGB);
+#endif
 }
 
 static float getUiScaleFromFont()
@@ -3338,8 +3343,12 @@ void Graph::graphButtons()
         GLuint64 my_image_texture = _renderer->_textureID;
         mx::Vector2 vec = _renderer->getViewCamera()->getViewportSize();
 
-        ImGui::Image((ImTextureID) my_image_texture, screenSize, ImVec2(0, 1), ImVec2(1, 0));
-
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+        ImVec2 minUV = ImVec2(0, 0), maxUV = ImVec2(1, 1);
+#else
+        ImVec2 minUV = ImVec2(0, 1), maxUV = ImVec2(1, 0);
+#endif
+        ImGui::Image((ImTextureID) my_image_texture, screenSize, minUV, maxUV);
         // Disable sRGB conversion for all other imgui ui components.
         ImGui::GetWindowDrawList()->AddCallback(DisableSRGBCallback, nullptr);
     }

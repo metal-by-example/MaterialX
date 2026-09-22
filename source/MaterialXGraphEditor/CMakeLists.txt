@@ -14,16 +14,49 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     add_compile_options(-Wno-format-truncation -Wno-use-after-free -Wno-comment -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-shadow)
 endif()
 
+set(MATERIALX_GRAPHEDITOR_RENDER_BACKEND_DEFINITIONS "")
+
+if(APPLE)
+    option(MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND "Use Metal Backend for MaterialXGraphEditor on Apple Platforms" OFF)
+
+    # Disables MaterialXGraphEditor Metal Rendering on MacOS version below 10.14
+    if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_HOST_SYSTEM_VERSION VERSION_LESS 19)
+        set(MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND OFF)
+    endif()
+
+    if(MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND)
+        set(MATERIALX_GRAPHEDITOR_RENDER_BACKEND_DEFINITIONS "-DMATERIALX_GRAPHEDITOR_METAL_BACKEND=1")
+    else()
+        set(MATERIALX_GRAPHEDITOR_RENDER_BACKEND_DEFINITIONS "-DMATERIALX_GRAPHEDITOR_OPENGL_BACKEND=1")
+    endif()
+endif()
+
 file(GLOB materialx_source "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 file(GLOB materialx_headers "${CMAKE_CURRENT_SOURCE_DIR}/*.h*")
 
 if (APPLE)
     list(APPEND materialx_source ${CMAKE_CURRENT_SOURCE_DIR}/FileDialog_Darwin.mm)
+endif()
+
+if (MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND)
+    # Compile all source files as Objective-C++ so we can use Metal and other 
+    # Obj-C APIs from within .cpp files.
+    set_source_files_properties(${materialx_source} PROPERTIES LANGUAGE OBJCXX)
 endif ()
 
 file(GLOB imgui_source "${DEAR_IMGUI_PREFIX}/*.cpp")
 file(GLOB imgui_headers "${DEAR_IMGUI_PREFIX}/*.h*")
 
+if(MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND)
+set(imgui_source ${imgui_source}
+    "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_glfw.cpp"
+    "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_metal.mm"
+    "${DEAR_IMGUI_PREFIX}/misc/cpp/imgui_stdlib.cpp")
+set(imgui_headers ${imgui_headers}
+    "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_glfw.h"
+    "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_metal.h"
+    "${DEAR_IMGUI_PREFIX}/misc/cpp/imgui_stdlib.h")
+else()
 set(imgui_source ${imgui_source}
     "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_glfw.cpp"
     "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_opengl3.cpp"
@@ -32,6 +65,7 @@ set(imgui_headers ${imgui_headers}
     "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_glfw.h"
     "${DEAR_IMGUI_PREFIX}/backends/imgui_impl_opengl3.h"
     "${DEAR_IMGUI_PREFIX}/misc/cpp/imgui_stdlib.h")
+endif()
 
 file(GLOB imguinode_source "${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiNodeEditor/*.cpp")
 file(GLOB imguinode_headers "${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiNodeEditor/*.h*")
@@ -67,6 +101,8 @@ if(MSVC)
     SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /ENTRY:mainCRTStartup")
 endif()
 
+add_definitions(${MATERIALX_GRAPHEDITOR_RENDER_BACKEND_DEFINITIONS})
+
 add_executable(MaterialXGraphEditor
     ${materialx_source}
     ${materialx_headers}
@@ -75,14 +111,30 @@ add_executable(MaterialXGraphEditor
     ${imguinode_source}
     ${imguinode_headers})
 
+if(APPLE)
+    target_compile_options(MaterialXGraphEditor PRIVATE -fobjc-arc)
+endif()
+
+if(MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND)
+set(MATERIALX_LIBRARIES
+    MaterialXFormat
+    MaterialXGenMsl
+    MaterialXRenderMsl)
+else()
 set(MATERIALX_LIBRARIES
     MaterialXFormat
     MaterialXGenGlsl
     MaterialXRenderGlsl)
+endif()
 
 if(APPLE)
     find_library(CORE_FOUNDATION Foundation REQUIRED)
     list(APPEND MATERIALX_LIBRARIES ${CORE_FOUNDATION})
+    if(MATERIALX_GRAPHEDITOR_USE_METAL_BACKEND)
+        find_library(METAL Metal REQUIRED)
+        find_library(QUARTZ_CORE QuartzCore REQUIRED)
+        list(APPEND MATERIALX_LIBRARIES ${METAL} ${QUARTZ_CORE})
+    endif()
 endif()
 
 target_link_libraries(

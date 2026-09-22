@@ -5,8 +5,16 @@
 
 #include <MaterialXGraphEditor/RenderView.h>
 
-#include "MaterialXRenderGlsl/GLTextureHandler.h"
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+#include <MaterialXRenderMsl/MetalTextureHandler.h>
+#include <MaterialXRenderMsl/MetalState.h>
+#include <MaterialXRenderMsl/MslMaterial.h>
+#include <MaterialXRenderMsl/MslPipelineStateObject.h>
+#else
+#include <MaterialXRenderGlsl/GlslMaterial.h>
+#include <MaterialXRenderGlsl/GLTextureHandler.h>
 #include <MaterialXRenderGlsl/External/Glad/glad.h>
+#endif
 
 #include <MaterialXRender/CgltfLoader.h>
 #include <MaterialXRender/Harmonics.h>
@@ -136,11 +144,16 @@ RenderView::RenderView(mx::DocumentPtr doc,
     _shadowSoftness(1),
     _selectedGeom(0),
     _selectedMaterial(0),
+    _identityCamera(mx::Camera::create()),
     _viewCamera(mx::Camera::create()),
     _envCamera(mx::Camera::create()),
     _shadowCamera(mx::Camera::create()),
     _lightHandler(mx::LightHandler::create()),
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    _genContext(mx::MslShaderGenerator::create()),
+#else
     _genContext(mx::GlslShaderGenerator::create()),
+#endif
     _unitRegistry(mx::UnitConverterRegistry::create()),
     _splitByUdims(true),
     _materialCompilation(false),
@@ -173,7 +186,11 @@ RenderView::RenderView(mx::DocumentPtr doc,
 void RenderView::initialize()
 {
     // Initialize image handler.
+#if MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    _imageHandler = mx::MetalTextureHandler::create(MTL(device), mx::StbImageLoader::create());
+#else
     _imageHandler = mx::GLTextureHandler::create(mx::StbImageLoader::create());
+#endif
 #if MATERIALX_BUILD_OIIO
     _imageHandler->addLoader(mx::OiioImageLoader::create());
 #endif
@@ -431,7 +448,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             {
                 for (const std::string& udim : udimSetValue->asA<mx::StringVec>())
                 {
-                    mx::MaterialPtr mat = mx::GlslMaterial::create();
+                    mx::MaterialPtr mat = createMaterial();
                     mat->setDocument(_document);
                     mat->setElement(typedElem);
                     mat->setMaterialNode(materialNode);
@@ -443,7 +460,7 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
             }
             else
             {
-                mx::MaterialPtr mat = mx::GlslMaterial::create();
+                mx::MaterialPtr mat = createMaterial();
                 mat->setDocument(_document);
                 mat->setElement(typedElem);
                 mat->setMaterialNode(materialNode);
@@ -453,6 +470,12 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
 
         if (!newMaterials.empty())
         {
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+            auto dummyFramebuffer = mx::MetalFramebuffer::create(MTL(device), 1, 1,
+                                                                 4, mx::Image::BaseType::UINT8,
+                                                                 nil, true);
+            MTL_PUSH_FRAMEBUFFER(dummyFramebuffer);
+#endif
             // Extend the image search path to include material source folders.
             mx::FileSearchPath extendedSearchPath = _searchPath;
             extendedSearchPath.append(_materialSearchPath);
@@ -546,6 +569,9 @@ void RenderView::updateMaterials(mx::TypedElementPtr typedElem)
                 }
             }
         }
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+        MTL_POP_FRAMEBUFFER();
+#endif
     }
     catch (mx::ExceptionRenderError& e)
     {
@@ -567,12 +593,14 @@ void RenderView::reloadShaders()
         for (mx::MaterialPtr material : _materials)
         {
             material->generateShader(_genContext);
+#ifndef MATERIALX_GRAPHEDITOR_METAL_BACKEND
             for (GLenum error = glGetError(); error; error = glGetError())
             {
                 std::cerr << "OpenGL error "
                           << "reload"
                           << ": " << std::to_string(error) << std::endl;
             }
+#endif
         }
         return;
     }
@@ -589,6 +617,15 @@ void RenderView::reloadShaders()
     }
 
     _materials.clear();
+}
+
+mx::MaterialPtr RenderView::createMaterial()
+{
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    return mx::MslMaterial::create();
+#else
+    return mx::GlslMaterial::create();
+#endif
 }
 
 void RenderView::initContext(mx::GenContext& context)
@@ -643,6 +680,33 @@ void RenderView::initContext(mx::GenContext& context)
     context.getShaderGenerator().registerTypeDefs(_document);
 }
 
+#if MATERIALX_GRAPHEDITOR_METAL_BACKEND
+void RenderView::drawContents()
+{
+    updateCameras();
+
+    // Render the current frame.
+    try
+    {
+        renderFrame();
+    }
+    catch (std::exception&)
+    {
+        _materialAssignments.clear();
+    }
+
+    // Capture the current frame.
+    if (_captureRequested)
+    {
+        _captureRequested = false;
+        mx::ImagePtr frameImage = _renderFrame->getColorImage(MTL(cmdQueue));
+        if (frameImage && _imageHandler->saveImage(_captureFilename, frameImage, false))
+        {
+            std::cout << "Wrote frame to disk: " << _captureFilename.asString() << std::endl;
+        }
+    }
+}
+#else
 void RenderView::drawContents()
 {
     updateCameras();
@@ -675,6 +739,7 @@ void RenderView::drawContents()
         glDrawBuffer(GL_BACK);
     }
 }
+#endif
 
 void RenderView::applyDirectLights(mx::DocumentPtr doc)
 {
@@ -740,6 +805,127 @@ void RenderView::loadEnvironmentLight()
     }
 }
 
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+void RenderView::renderFrame()
+{
+    // Update lighting state.
+    _lightHandler->setLightTransform(mx::Matrix44::createRotationY(_lightRotation / 180.0f * PI));
+
+    // Update shadow state.
+    mx::ShadowState shadowState;
+    mx::NodePtr dirLight = _lightHandler->getFirstLightOfCategory(DIR_LIGHT_NODE_CATEGORY);
+    if (_genContext.getOptions().hwShadowMap && dirLight)
+    {
+        mx::ImagePtr shadowMap = getShadowMap();
+        if (shadowMap)
+        {
+            shadowState.shadowMap = shadowMap;
+            shadowState.shadowMatrix = _viewCamera->getWorldMatrix().getInverse() *
+                                       _shadowCamera->getWorldViewProjMatrix();
+        }
+        else
+        {
+            _genContext.getOptions().hwShadowMap = false;
+        }
+    }
+
+    // Initialize viewport render.
+    if (!_renderFrame ||
+        _renderFrame->getWidth() != (unsigned int) _viewWidth ||
+        _renderFrame->getHeight() != (unsigned int) _viewHeight)
+    {
+        _renderFrame = mx::MetalFramebuffer::create(MTL(device),
+                                                    (unsigned int) _viewWidth, (unsigned int) _viewHeight,
+                                                    4, mx::Image::BaseType::UINT8);
+    }
+
+    mx::Color3 screenColor(mx::DEFAULT_SCREEN_COLOR_SRGB);
+    MTLRenderPassDescriptor *renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
+    _renderFrame->bind(renderPass);
+    renderPass.colorAttachments[0].clearColor = MTLClearColorMake(screenColor[0], screenColor[1], screenColor[2], 1.0);
+    id<MTLTexture> linearTarget = _renderFrame->getColorTexture();
+    // Render through an sRGB view so the preview texture stores encoded color
+    // values, then expose the underlying linear view to legacy ImGui sampling.
+    renderPass.colorAttachments[0].texture =
+        [linearTarget newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+
+    auto cmdBuffer = [MTL(cmdQueue) commandBuffer];
+    auto cmdEncoder = [cmdBuffer renderCommandEncoderWithDescriptor:renderPass];
+    MTL(renderCmdEncoder) = cmdEncoder;
+
+    // Enable backface culling if requested.
+    if (!_renderDoubleSided)
+    {
+        [cmdEncoder setCullMode:MTLCullModeBack];
+    }
+
+    // Opaque pass
+    [cmdEncoder setDepthStencilState:MTL_DEPTHSTENCIL_STATE(opaque)];
+    for (const auto& assignment : _materialAssignments)
+    {
+        mx::MeshPartitionPtr geom = assignment.first;
+        auto material = std::static_pointer_cast<mx::MslMaterial>(assignment.second);
+        if (!material)
+        {
+            continue;
+        }
+
+        material->bindShader();
+        material->bindMesh(_geometryHandler->findParentMesh(geom));
+        if (material->getProgram()->hasUniform(mx::HW::ALPHA_THRESHOLD))
+        {
+            material->getProgram()->bindUniform(mx::HW::ALPHA_THRESHOLD, mx::Value::createValue(0.99f));
+        }
+        material->getProgram()->bindTimeAndFrame((float) _timer.elapsedTime(), (float) _frame);
+        material->bindViewInformation(_viewCamera);
+        material->bindLighting(_lightHandler, _imageHandler, shadowState);
+        material->bindImages(_imageHandler, _searchPath);
+        material->prepareUsedResources(_viewCamera, _geometryHandler, _imageHandler, _lightHandler);
+        material->drawPartition(geom);
+        material->unbindImages(_imageHandler);
+    }
+
+    // Transparent pass
+    if (_renderTransparency)
+    {
+        [cmdEncoder setDepthStencilState:MTL_DEPTHSTENCIL_STATE(transparent)];
+
+        for (const auto& assignment : _materialAssignments)
+        {
+            mx::MeshPartitionPtr geom = assignment.first;
+            auto material = std::static_pointer_cast<mx::MslMaterial>(assignment.second);
+            if (!material || !material->hasTransparency())
+            {
+                continue;
+            }
+
+            material->bindShader();
+            material->bindMesh(_geometryHandler->findParentMesh(geom));
+            if (material->getProgram()->hasUniform(mx::HW::ALPHA_THRESHOLD))
+            {
+                material->getProgram()->bindUniform(mx::HW::ALPHA_THRESHOLD, mx::Value::createValue(0.001f));
+            }
+            material->getProgram()->bindTimeAndFrame((float) _timer.elapsedTime(), (float) _frame);
+            material->bindViewInformation(_viewCamera);
+            material->bindLighting(_lightHandler, _imageHandler, shadowState);
+            material->bindImages(_imageHandler, _searchPath);
+            material->prepareUsedResources(_viewCamera, _geometryHandler, _imageHandler, _lightHandler);
+            material->drawPartition(geom);
+            material->unbindImages(_imageHandler);
+        }
+    }
+
+    [cmdEncoder endEncoding];
+    MTL(renderCmdEncoder) = nil;
+    [cmdBuffer commit];
+
+    // Store viewport texture for render.
+    // This storage is outside of the ARC lifetime model, but since
+    // the texture is retained by the framebuffer, it is expected
+    // to live long enough to be used later this frame.
+    _textureID = (uintptr_t)_renderFrame->getColorTexture();
+}
+#else
 void RenderView::renderFrame()
 {
     // Initialize OpenGL state
@@ -859,6 +1045,7 @@ void RenderView::renderFrame()
     // Store viewport texture for render.
     _textureID = _renderFrame->getColorTexture();
 }
+#endif
 
 void RenderView::initCamera()
 {
@@ -882,6 +1069,13 @@ void RenderView::initCamera()
 
 void RenderView::updateCameras()
 {
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    auto& createPerspectiveMatrix = mx::Camera::createPerspectiveMatrixZP;
+    auto& createOrthographicMatrix = mx::Camera::createOrthographicMatrixZP;
+#else
+    auto& createPerspectiveMatrix = mx::Camera::createPerspectiveMatrix;
+    auto& createOrthographicMatrix = mx::Camera::createOrthographicMatrix;
+#endif
     mx::Matrix44 viewMatrix, projectionMatrix;
     float aspectRatio = (float) _viewHeight / _viewHeight;
     if (_cameraViewAngle != 0.0f)
@@ -889,16 +1083,18 @@ void RenderView::updateCameras()
         viewMatrix = mx::Camera::createViewMatrix(_cameraPosition, _cameraTarget, _cameraUp);
         float fH = std::tan(_cameraViewAngle / 360.0f * PI) * _cameraNearDist;
         float fW = fH * aspectRatio;
-        projectionMatrix = mx::Camera::createPerspectiveMatrix(-fW, fW, -fH, fH, _cameraNearDist, _cameraFarDist);
+        projectionMatrix = createPerspectiveMatrix(-fW, fW, -fH, fH, _cameraNearDist, _cameraFarDist);
     }
     else
     {
         viewMatrix = mx::Matrix44::createTranslation(mx::Vector3(0.0f, 0.0f, -ORTHO_VIEW_DISTANCE));
         float fH = ORTHO_PROJECTION_HEIGHT;
         float fW = fH * aspectRatio;
-        projectionMatrix = mx::Camera::createOrthographicMatrix(-fW, fW, -fH, fH, 0.0f, ORTHO_VIEW_DISTANCE + _cameraFarDist);
+        projectionMatrix = createOrthographicMatrix(-fW, fW, -fH, fH, 0.0f, ORTHO_VIEW_DISTANCE + _cameraFarDist);
     }
-
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    projectionMatrix[1][1] = -projectionMatrix[1][1];
+#endif
     mx::Matrix44 meshRotation = mx::Matrix44::createRotationZ(_meshRotation[2] / 180.0f * PI) *
                                 mx::Matrix44::createRotationY(_meshRotation[1] / 180.0f * PI) *
                                 mx::Matrix44::createRotationX(_meshRotation[0] / 180.0f * PI);
@@ -920,7 +1116,11 @@ void RenderView::updateCameras()
         mx::Vector3 sphereCenter = (_geometryHandler->getMaximumBounds() + _geometryHandler->getMinimumBounds()) * 0.5;
         float r = (sphereCenter - _geometryHandler->getMinimumBounds()).getMagnitude();
         _shadowCamera->setWorldMatrix(meshRotation * mx::Matrix44::createTranslation(-sphereCenter));
-        _shadowCamera->setProjectionMatrix(mx::Camera::createOrthographicMatrix(-r, r, -r, r, 0.0f, r * 2.0f));
+        mx::Matrix44 shadowMatrix = createOrthographicMatrix(-r, r, -r, r, 0.0f, r * 2.0f);
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+        shadowMatrix[1][1] = -shadowMatrix[1][1];
+#endif
+        _shadowCamera->setProjectionMatrix(shadowMatrix);
         mx::ValuePtr value = dirLight->getInputValue("direction");
         if (value->isA<mx::Vector3>())
         {
@@ -936,9 +1136,141 @@ void RenderView::renderScreenSpaceQuad(mx::MaterialPtr material)
         _quadMesh = mx::GeometryHandler::createQuadMesh();
 
     material->bindMesh(_quadMesh);
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    std::static_pointer_cast<mx::MslMaterial>(material)
+        ->prepareUsedResources(_identityCamera, _geometryHandler, _imageHandler, _lightHandler);
+#endif
     material->drawPartition(_quadMesh->getPartition(0));
 }
 
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+mx::ImagePtr RenderView::getShadowMap()
+{
+    mx::MetalTextureHandlerPtr mtlImageHandler =
+        std::dynamic_pointer_cast<mx::MetalTextureHandler>(_imageHandler);
+
+    std::vector<id<MTLTexture>> shadowMapTex { _shadowMaps.size(), nil };
+    for(int i = 0; i < _shadowMaps.size(); ++i)
+    {
+        if(!_shadowMaps[i] || _shadowMaps[i]->getWidth() != SHADOW_MAP_SIZE ||
+           !mtlImageHandler->getAssociatedMetalTexture(_shadowMaps[i]))
+        {
+            _shadowMaps[i] = mx::Image::create(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 2, mx::Image::BaseType::FLOAT);
+            _imageHandler->createRenderResources(_shadowMaps[i], false, true);
+        }
+
+        shadowMapTex[i] = mtlImageHandler->getAssociatedMetalTexture(_shadowMaps[i]);
+    }
+
+    if (!_shadowMap)
+    {
+        // Create framebuffer.
+        if(!_shadowMapFramebuffer)
+        {
+            _shadowMapFramebuffer = mx::MetalFramebuffer::create(MTL(device), SHADOW_MAP_SIZE, SHADOW_MAP_SIZE,
+                                                                 2, mx::Image::BaseType::FLOAT, shadowMapTex[0]);
+        }
+        MTL_PUSH_FRAMEBUFFER(_shadowMapFramebuffer);
+
+        // Generate shaders for shadow rendering.
+        if (!_shadowMaterial)
+        {
+            try
+            {
+                mx::ShaderPtr hwShader = mx::createDepthShader(_genContext, _stdLib, "__SHADOW_SHADER__");
+                _shadowMaterial = mx::MslMaterial::create();
+                _shadowMaterial->generateShader(hwShader);
+            }
+            catch (std::exception& e)
+            {
+                std::cerr << "Failed to generate shadow shader: " << e.what() << std::endl;
+                _shadowMaterial = nullptr;
+            }
+        }
+        if (!_shadowBlurMaterial)
+        {
+            try
+            {
+                mx::ShaderPtr hwShader = mx::createBlurShader(_genContext, _stdLib, "__SHADOW_BLUR_SHADER__", "gaussian", 1.0f);
+                _shadowBlurMaterial = mx::MslMaterial::create();
+                _shadowBlurMaterial->generateShader(hwShader);
+            }
+            catch (std::exception& e)
+            {
+                std::cerr << "Failed to generate shadow blur shader: " << e.what() << std::endl;
+                _shadowBlurMaterial = nullptr;
+            }
+        }
+        MTL_POP_FRAMEBUFFER();
+
+        if (_shadowMaterial && _shadowBlurMaterial)
+        {
+            bool captureShadowGeneration = false;
+            if(captureShadowGeneration)
+                MTL_TRIGGER_CAPTURE;
+
+            auto cmdBuffer = [MTL(cmdQueue) commandBuffer];
+            MTLRenderPassDescriptor* renderpassDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+            _shadowMapFramebuffer->setColorTexture(shadowMapTex[0]);
+            _shadowMapFramebuffer->bind(renderpassDesc);
+            auto cmdEncoder = [cmdBuffer renderCommandEncoderWithDescriptor:renderpassDesc];
+            [cmdEncoder setDepthStencilState:MTL_DEPTHSTENCIL_STATE(opaque)];
+            MTL(renderCmdEncoder) = cmdEncoder;
+
+            // Render shadow geometry.
+            _shadowMaterial->bindShader();
+            for (auto mesh : _geometryHandler->getMeshes())
+            {
+                _shadowMaterial->bindMesh(mesh);
+                _shadowMaterial->bindViewInformation(_shadowCamera);
+                std::static_pointer_cast<mx::MslMaterial>
+                (_shadowMaterial)->prepareUsedResources(_shadowCamera, _geometryHandler,
+                                                        _imageHandler, _lightHandler);
+                for (size_t i = 0; i < mesh->getPartitionCount(); i++)
+                {
+                    mx::MeshPartitionPtr geom = mesh->getPartition(i);
+                    _shadowMaterial->drawPartition(geom);
+                }
+            }
+
+            [cmdEncoder endEncoding];
+            MTL(renderCmdEncoder) = nil;
+
+            // Apply Gaussian blurring.
+            mx::ImageSamplingProperties blurSamplingProperties;
+            blurSamplingProperties.uaddressMode = mx::ImageSamplingProperties::AddressMode::CLAMP;
+            blurSamplingProperties.vaddressMode = mx::ImageSamplingProperties::AddressMode::CLAMP;
+            blurSamplingProperties.filterType = mx::ImageSamplingProperties::FilterType::CLOSEST;
+            for (unsigned int i = 0; i < _shadowSoftness; i++)
+            {
+                _shadowMapFramebuffer->setColorTexture(shadowMapTex[(i+1) % 2]);
+                _shadowMapFramebuffer->bind(renderpassDesc);
+                cmdEncoder = [cmdBuffer renderCommandEncoderWithDescriptor:renderpassDesc];
+                MTL(renderCmdEncoder) = cmdEncoder;
+                _shadowBlurMaterial->bindShader();
+                std::static_pointer_cast<mx::MslMaterial>
+                (_shadowBlurMaterial)->getProgram()->bindTexture(_imageHandler, "image_file_tex",
+                                                                 _shadowMaps[i % 2], blurSamplingProperties);
+                std::static_pointer_cast<mx::MslMaterial>
+                (_shadowBlurMaterial)->prepareUsedResources(_identityCamera, _geometryHandler,
+                                                            _imageHandler, _lightHandler);
+                _shadowBlurMaterial->unbindGeometry();
+                renderScreenSpaceQuad(_shadowBlurMaterial);
+                [cmdEncoder endEncoding];
+                MTL(renderCmdEncoder) = nil;
+            }
+
+            [cmdBuffer commit];
+
+            if(captureShadowGeneration)
+                MTL_STOP_CAPTURE;
+        }
+    }
+
+    _shadowMap = _shadowMaps[_shadowSoftness % 2];
+    return _shadowMap;
+}
+#else
 mx::ImagePtr RenderView::getShadowMap()
 {
     if (!_shadowMap)
@@ -976,8 +1308,12 @@ mx::ImagePtr RenderView::getShadowMap()
         if (_shadowMaterial && _shadowBlurMaterial)
         {
             // Create framebuffer.
-            mx::GLFramebufferPtr framebuffer = mx::GLFramebuffer::create(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 2, mx::Image::BaseType::FLOAT);
-            framebuffer->bind();
+            if (!_shadowMapFramebuffer)
+            {
+                _shadowMapFramebuffer = mx::GLFramebuffer::create(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE,
+                                                                  2, mx::Image::BaseType::FLOAT);
+            }
+            _shadowMapFramebuffer->bind();
             glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
@@ -993,7 +1329,7 @@ mx::ImagePtr RenderView::getShadowMap()
                     _shadowMaterial->drawPartition(geom);
                 }
             }
-            _shadowMap = framebuffer->getColorImage();
+            _shadowMap = _shadowMapFramebuffer->getColorImage();
 
             // Apply Gaussian blurring.
             mx::ImageSamplingProperties blurSamplingProperties;
@@ -1002,7 +1338,7 @@ mx::ImagePtr RenderView::getShadowMap()
             blurSamplingProperties.filterType = mx::ImageSamplingProperties::FilterType::CLOSEST;
             for (unsigned int i = 0; i < _shadowSoftness; i++)
             {
-                framebuffer->bind();
+                _shadowMapFramebuffer->bind();
                 _shadowBlurMaterial->bindShader();
                 if (_imageHandler->bindImage(_shadowMap, blurSamplingProperties))
                 {
@@ -1017,7 +1353,7 @@ mx::ImagePtr RenderView::getShadowMap()
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
                 renderScreenSpaceQuad(_shadowBlurMaterial);
                 _imageHandler->releaseRenderResources(_shadowMap);
-                _shadowMap = framebuffer->getColorImage();
+                _shadowMap = _shadowMapFramebuffer->getColorImage();
             }
 
             // Restore state for scene rendering.
@@ -1029,3 +1365,4 @@ mx::ImagePtr RenderView::getShadowMap()
 
     return _shadowMap;
 }
+#endif

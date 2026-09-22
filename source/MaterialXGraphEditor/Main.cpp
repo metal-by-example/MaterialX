@@ -8,10 +8,29 @@
 #include <MaterialXFormat/File.h>
 #include <MaterialXFormat/Util.h>
 
-#include <imgui_impl_glfw.h>
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+#include <MaterialXRenderMsl/MetalState.h>
+#else
+#include <MaterialXRenderGlsl/External/Glad/glad.h>
+#endif
+
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+#include <imgui_impl_metal.h>
+#else
 #include <imgui_impl_opengl3.h>
+#endif
+#include <imgui_impl_glfw.h>
 
 #include <GLFW/glfw3.h>
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
+#endif
+
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+#endif
 
 #include <iostream>
 #include <limits>
@@ -170,14 +189,25 @@ int main(int argc, char* const argv[])
         return 1;
     }
 
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    // Initialize global Metal objects
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLCommandQueue> cmdQueue = [device newCommandQueue];
+    MTL(initialize(device, cmdQueue));
+#endif
+
     // Determine GL and GLSL versions
 #if defined(__APPLE__)
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+#else
     // GL 3.2 + GLSL 150
     const char* glsl_version = "#version 150";
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); // 3.2+ only
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);           // Required on Mac
+#endif
 #else
     // GL 3.0 + GLSL 130
     const char* glsl_version = "#version 130";
@@ -198,8 +228,19 @@ int main(int argc, char* const argv[])
     {
         return 1;
     }
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    NSWindow *nsWindow = glfwGetCocoaWindow(window);
+    CAMetalLayer *metalLayer = [CAMetalLayer layer];
+    [nsWindow.contentView setLayer:metalLayer];
+    [nsWindow.contentView setWantsLayer:YES];
+    metalLayer.device = MTL(device);
+    metalLayer.framebufferOnly = NO;
+    metalLayer.contentsScale = nsWindow.backingScaleFactor;
+    metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+#else
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // Enable vsync
+#endif
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -248,8 +289,13 @@ int main(int argc, char* const argv[])
     ImGui::StyleColorsDark();
 
     // Setup Platform/Renderer backends
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    ImGui_ImplGlfw_InitForOther(window, true);
+    ImGui_ImplMetal_Init(MTL(device));
+#else
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
+#endif
 
     // Create graph editor.
     Graph* graph = new Graph(materialFilename,
@@ -289,6 +335,60 @@ int main(int argc, char* const argv[])
     editorStyle.LinkStrength  = 125.0f;
 
     // Main loop
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    while (!glfwWindowShouldClose(window))
+    {
+        @autoreleasepool
+        {
+            glfwPollEvents();
+
+            CGSize currentSize = metalLayer.drawableSize;
+            CGSize targetSize = [nsWindow.contentView convertSizeToBacking:nsWindow.contentView.bounds.size];
+            if (currentSize.width != targetSize.width || currentSize.height != targetSize.height)
+            {
+                metalLayer.drawableSize = targetSize;
+                ImGuiIO& io = ImGui::GetIO();
+                io.DisplaySize = ImVec2((float)targetSize.width, (float)targetSize.height);
+            }
+
+            id<CAMetalDrawable> drawable = [metalLayer nextDrawable];
+            if (!drawable)
+            {
+                continue;
+            }
+            MTLRenderPassDescriptor *renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+            renderPassDescriptor.colorAttachments[0].texture = drawable.texture;
+            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            renderPassDescriptor.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+            ImGui_ImplMetal_NewFrame(renderPassDescriptor);
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            auto renderer = graph->getRenderer();
+            constexpr auto FRAME_MAX_VALUE = std::numeric_limits<unsigned int>::max();
+            renderer->setFrame((renderer->getFrame() + 1) % FRAME_MAX_VALUE);
+            renderer->drawContents();
+            if (!captureFilename.empty())
+            {
+                break;
+            }
+
+            double xpos = 0.0;
+            double ypos = 0.0;
+            glfwGetCursorPos(window, &xpos, &ypos);
+            graph->drawGraph(ImVec2((float) xpos, (float) ypos));
+            ImGui::Render();
+            auto cmdBuffer = [MTL(cmdQueue) commandBuffer];
+            auto cmdEncoder = [cmdBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+            ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmdBuffer, cmdEncoder);
+            [cmdEncoder endEncoding];
+            [cmdBuffer presentDrawable:drawable];
+            [cmdBuffer commit];
+        }
+    }
+#else
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
@@ -314,9 +414,14 @@ int main(int argc, char* const argv[])
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
     }
+#endif
 
     // Cleanup
+#ifdef MATERIALX_GRAPHEDITOR_METAL_BACKEND
+    ImGui_ImplMetal_Shutdown();
+#else
     ImGui_ImplOpenGL3_Shutdown();
+#endif
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
     if (editorContext)
